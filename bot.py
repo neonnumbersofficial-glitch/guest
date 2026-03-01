@@ -24,7 +24,7 @@ from datetime import datetime
 # ==========================================
 # 𝐅𝐋𝐀𝐒𝐊 𝐈𝐌𝐏𝐎𝐑𝐓𝐒
 # ==========================================
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, request, send_file, render_template_string
 import threading
 import psutil
 from datetime import datetime, timedelta
@@ -42,11 +42,17 @@ OWNER_ID = 123456789  # Replace with your Telegram ID
 
 bot = telebot.TeleBot(API_TOKEN)
 
-# 𝐏𝐫𝐨𝐱𝐲 𝐂𝐨𝐧𝐟𝐢𝐠
-PROXIES = {
-    'http': 'socks5h://127.0.0.1:9050',
-    'https': 'socks5h://127.0.0.1:9050'
-}
+# 𝐏𝐫𝐨𝐱𝐲 𝐂𝐨𝐧𝐟𝐢𝐠 - Disable proxies on Render since Tor won't work
+IS_RENDER = os.environ.get('RENDER', False) or 'RENDER' in os.environ
+
+if IS_RENDER:
+    PROXIES = {}
+    print("🚀 Running on Render - Tor disabled")
+else:
+    PROXIES = {
+        'http': 'socks5h://127.0.0.1:9050',
+        'https': 'socks5h://127.0.0.1:9050'
+    }
 
 user_data = {}
 user_settings = {}
@@ -62,8 +68,8 @@ bot_stats = {
 # ==========================================
 # 𝐃𝐀𝐒𝐇𝐁𝐎𝐀𝐑𝐃 𝐂𝐎𝐍𝐅𝐈𝐆
 # ==========================================
-DASHBOARD_PORT = 5000
-DASHBOARD_HOST = '127.0.0.1'
+DASHBOARD_PORT = int(os.environ.get('PORT', 5000))
+DASHBOARD_HOST = '0.0.0.0'  # Critical for Render
 
 app = Flask(__name__)
 
@@ -201,10 +207,14 @@ def create_inline_region_buttons():
     return markup
 
 # ==========================================
-# 𝐓𝐎𝐑 𝐒𝐄𝐑𝐕𝐈𝐂𝐄
+# 𝐓𝐎𝐑 𝐒𝐄𝐑𝐕𝐈𝐂𝐄 (𝐃𝐈𝐒𝐀𝐁𝐋𝐄𝐃 𝐎𝐍 𝐑𝐄𝐍𝐃𝐄𝐑)
 # ==========================================
 
 def start_tor_service():
+    if IS_RENDER:
+        print("⏭️ Skipping Tor on Render")
+        return True
+        
     try:
         result = subprocess.run(['pgrep', 'tor'], capture_output=True)
         if result.returncode == 0:
@@ -307,7 +317,8 @@ def get_session():
     adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
-    session.proxies.update(PROXIES)
+    if not IS_RENDER:
+        session.proxies.update(PROXIES)
     session.verify = False
     return session
 
@@ -389,7 +400,7 @@ def get_dashboard_stats():
     }
 
 # ==========================================
-# 𝐅𝐋𝐀𝐒𝐊 𝐑𝐎𝐔𝐓𝐄𝐒 (𝐒𝐈𝐌𝐏𝐋𝐈𝐅𝐈𝐄𝐃)
+# 𝐅𝐋𝐀𝐒𝐊 𝐑𝐎𝐔𝐓𝐄𝐒 (𝐅𝐈𝐗𝐄𝐃 𝐅𝐎𝐑 𝐑𝐄𝐍𝐃𝐄𝐑)
 # ==========================================
 
 @app.route('/')
@@ -397,6 +408,9 @@ def dashboard():
     stats = get_dashboard_stats()
     uptime = datetime.now() - bot_stats['start_time']
     uptime_str = str(uptime).split('.')[0]
+    
+    # Get Render URL if available
+    render_url = os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5000')
     
     return f"""
     <html>
@@ -409,11 +423,17 @@ def dashboard():
             .card {{ background: #2d2d2d; padding: 20px; border-radius: 10px; border-left: 4px solid #00ff00; }}
             .value {{ font-size: 2em; font-weight: bold; color: #00ff00; }}
             .label {{ color: #888; }}
+            .info {{ background: #333; padding: 10px; border-radius: 5px; margin-top: 20px; }}
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🔥 EXU CODER Dashboard</h1>
+            <div class="info">
+                <p>🌐 Running on: Render</p>
+                <p>🔗 URL: {render_url}</p>
+                <p>🔄 Tor: {'Disabled on Render' if IS_RENDER else 'Active'}</p>
+            </div>
             <div class="stats">
                 <div class="card">
                     <div class="value">{stats['total_users']}</div>
@@ -449,7 +469,123 @@ def dashboard():
     </html>
     """
 
+@app.route('/api/stats')
+def api_stats():
+    stats = get_dashboard_stats()
+    return jsonify(stats)
+
+@app.route('/api/accounts')
+def api_accounts():
+    conn = sqlite3.connect('bot_stats.db')
+    c = conn.cursor()
+    c.execute('''SELECT timestamp, uid, password, nickname, region, username 
+                 FROM verified_accounts ORDER BY timestamp DESC LIMIT 50''')
+    accounts = c.fetchall()
+    conn.close()
+    
+    accounts_list = []
+    for acc in accounts:
+        accounts_list.append({
+            'timestamp': acc[0],
+            'uid': acc[1],
+            'password': acc[2],
+            'nickname': acc[3],
+            'region': acc[4],
+            'username': acc[5]
+        })
+    
+    return jsonify(accounts_list)
+
+@app.route('/api/users')
+def api_users():
+    conn = sqlite3.connect('bot_stats.db')
+    c = conn.cursor()
+    c.execute('''SELECT user_id, username, first_name, last_seen, join_date,
+                 total_generations, total_accounts_generated, total_real_accounts
+                 FROM bot_users ORDER BY total_real_accounts DESC''')
+    users = c.fetchall()
+    conn.close()
+    
+    users_list = []
+    for user in users:
+        users_list.append({
+            'user_id': user[0],
+            'username': user[1],
+            'first_name': user[2],
+            'last_seen': user[3],
+            'join_date': user[4],
+            'total_generations': user[5],
+            'total_accounts': user[6],
+            'total_real': user[7]
+        })
+    
+    return jsonify(users_list)
+
+@app.route('/api/generations')
+def api_generations():
+    conn = sqlite3.connect('bot_stats.db')
+    c = conn.cursor()
+    c.execute('''SELECT timestamp, username, first_name, count, real_accounts, fake_accounts, region, duration
+                 FROM generation_stats ORDER BY timestamp DESC LIMIT 100''')
+    gens = c.fetchall()
+    conn.close()
+    
+    gens_list = []
+    for gen in gens:
+        gens_list.append({
+            'timestamp': gen[0],
+            'username': gen[1],
+            'first_name': gen[2],
+            'count': gen[3],
+            'real': gen[4],
+            'fake': gen[5],
+            'region': gen[6],
+            'duration': round(gen[7], 2) if gen[7] else 0
+        })
+    
+    return jsonify(gens_list)
+
+@app.route('/api/active')
+def api_active():
+    active_list = []
+    for chat_id, gen_info in active_generations.items():
+        active_list.append({
+            'chat_id': chat_id,
+            'progress': gen_info.get('progress', 0),
+            'real': gen_info.get('real', 0),
+            'fake': gen_info.get('fake', 0),
+            'region': gen_info.get('region', 'N/A'),
+            'start_time': str(gen_info.get('start_time', ''))
+        })
+    return jsonify(active_list)
+
+@app.route('/export/accounts')
+def export_accounts():
+    conn = sqlite3.connect('bot_stats.db')
+    c = conn.cursor()
+    c.execute('''SELECT timestamp, uid, password, nickname, region, username 
+                 FROM verified_accounts ORDER BY timestamp DESC''')
+    accounts = c.fetchall()
+    conn.close()
+    
+    si = StringIO()
+    cw = csv.writer(si)
+    cw.writerow(['Timestamp', 'UID', 'Password', 'Nickname', 'Region', 'Generated By'])
+    for acc in accounts:
+        cw.writerow(acc)
+    
+    output = BytesIO()
+    output.write(si.getvalue().encode('utf-8'))
+    output.seek(0)
+    
+    return send_file(output, mimetype='text/csv', as_attachment=True, download_name='verified_accounts.csv')
+
+# ==========================================
+# 𝐅𝐔𝐍𝐂𝐓𝐈𝐎𝐍 𝐓𝐎 𝐑𝐔𝐍 𝐅𝐋𝐀𝐒𝐊 (𝐅𝐈𝐗𝐄𝐃 𝐅𝐎𝐑 𝐑𝐄𝐍𝐃𝐄𝐑)
+# ==========================================
 def run_flask():
+    """Starts the Flask web server, binding to the correct host/port for Render."""
+    print(f"🌐 Starting Flask dashboard on {DASHBOARD_HOST}:{DASHBOARD_PORT}")
     app.run(host=DASHBOARD_HOST, port=DASHBOARD_PORT, debug=False, threaded=True)
 
 # ==========================================
@@ -571,7 +707,7 @@ def logic_major_register(access_token, open_id, field, uid, password, region, ac
         return None
 
 # ==========================================
-# 𝐖𝐎𝐑𝐊𝐄𝐑 𝐏𝐑𝐎𝐂𝐄𝐒𝐒 (𝐖𝐈𝐓𝐇 𝐉𝐒𝐎𝐍 𝐅𝐈𝐋𝐄 𝐅𝐎𝐑 𝐋𝐀𝐑𝐆𝐄 𝐁𝐀𝐓𝐂𝐇𝐄𝐒)
+# 𝐖𝐎𝐑𝐊𝐄𝐑 𝐏𝐑𝐎𝐂𝐄𝐒𝐒
 # ==========================================
 
 def worker_process(chat_id, total, name_prefix, pass_prefix, region, message_id):
@@ -587,14 +723,15 @@ def worker_process(chat_id, total, name_prefix, pass_prefix, region, message_id)
             'start_time': datetime.now()
         }
         
-        try:
-            session.get("https://check.torproject.org", timeout=5)
-        except:
-            bot.edit_message_text("❌ **𝐓𝐎𝐑 𝐄𝐑𝐑𝐎𝐑**\n𝐓𝐨𝐫 𝐢𝐬 𝐧𝐨𝐭 𝐫𝐮𝐧𝐧𝐢𝐧𝐠!", 
-                                chat_id, message_id, parse_mode='Markdown')
-            if chat_id in active_generations:
-                del active_generations[chat_id]
-            return
+        if not IS_RENDER:
+            try:
+                session.get("https://check.torproject.org", timeout=5)
+            except:
+                bot.edit_message_text("❌ **𝐓𝐎𝐑 𝐄𝐑𝐑𝐎𝐑**\n𝐓𝐨𝐫 𝐢𝐬 𝐧𝐨𝐭 𝐫𝐮𝐧𝐧𝐢𝐧𝐠!", 
+                                    chat_id, message_id, parse_mode='Markdown')
+                if chat_id in active_generations:
+                    del active_generations[chat_id]
+                return
 
         real_accounts = 0
         fake_accounts = 0
@@ -675,9 +812,7 @@ def worker_process(chat_id, total, name_prefix, pass_prefix, region, message_id)
         if chat_id in active_generations:
             del active_generations[chat_id]
         
-        # Send results based on quantity
         if real_accounts > 0:
-            # Create summary message
             summary = (
                 f"✅ **𝐆𝐄𝐍𝐄𝐑𝐀𝐓𝐈𝐎𝐍 𝐂𝐎𝐌𝐏𝐋𝐄𝐓𝐄𝐃!**\n\n"
                 f"📊 **𝐒𝐮𝐦𝐦𝐚𝐫𝐲:**\n"
@@ -688,12 +823,9 @@ def worker_process(chat_id, total, name_prefix, pass_prefix, region, message_id)
                 f"   • **⏱️ 𝐓𝐢𝐦𝐞:** {int(duration)}s\n"
             )
             
-            # If large batch (>= 100 accounts), send as JSON file
             if total >= 100:
-                # Create JSON file
                 filename = f"EXU_ACCOUNTS_{region}_{random.randint(1000,9999)}.json"
                 
-                # Prepare JSON data
                 json_data = {
                     "generation_info": {
                         "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -707,11 +839,9 @@ def worker_process(chat_id, total, name_prefix, pass_prefix, region, message_id)
                     "accounts": verified_accounts
                 }
                 
-                # Save JSON file
                 with open(filename, 'w', encoding='utf-8') as f:
                     json.dump(json_data, f, indent=2, ensure_ascii=False)
                 
-                # Send JSON file
                 with open(filename, 'rb') as f:
                     bot.send_document(
                         chat_id, 
@@ -720,12 +850,10 @@ def worker_process(chat_id, total, name_prefix, pass_prefix, region, message_id)
                         parse_mode='Markdown'
                     )
                 
-                # Delete file after sending
                 os.remove(filename)
                 bot.delete_message(chat_id, message_id)
             
             else:
-                # For small batches, send as text message
                 result_text = summary + "\n📋 **𝐕𝐞𝐫𝐢𝐟𝐢𝐞𝐝 𝐀𝐜𝐜𝐨𝐮𝐧𝐭𝐬:**\n\n"
                 
                 for idx, acc in enumerate(verified_accounts, 1):
@@ -735,7 +863,6 @@ def worker_process(chat_id, total, name_prefix, pass_prefix, region, message_id)
                     result_text += f"   ├─ **𝐍𝐢𝐜𝐤:** {acc['nickname']}\n"
                     result_text += f"   └─ **𝐒𝐭𝐚𝐭𝐮𝐬:** ✅ 𝐑𝐄𝐀𝐋\n\n"
                 
-                # Split long messages
                 if len(result_text) > 4000:
                     parts = [result_text[i:i+4000] for i in range(0, len(result_text), 4000)]
                     for part in parts:
@@ -769,12 +896,14 @@ def send_welcome(message):
     user_id = message.from_user.id
     is_owner = (user_id == OWNER_ID)
     
+    render_msg = " (Render Cloud)" if IS_RENDER else ""
+    
     welcome_text = (
-        f"🔥 **𝐄𝐗𝐔 𝐂𝐎𝐃𝐄𝐑 𝐁𝐎𝐓** 🔥\n\n"
+        f"🔥 **𝐄𝐗𝐔 𝐂𝐎𝐃𝐄𝐑 𝐁𝐎𝐓{render_msg}** 🔥\n\n"
         f"👋 **𝐖𝐞𝐥𝐜𝐨𝐦𝐞 {message.from_user.first_name}!**\n"
         f"🆔 **𝐈𝐃:** `{user_id}`\n"
         f"⚡ **𝐒𝐭𝐚𝐭𝐮𝐬:** 𝐎𝐧𝐥𝐢𝐧𝐞\n"
-        f"🛡️ **𝐏𝐫𝐨𝐭𝐞𝐜𝐭𝐢𝐨𝐧:** 𝐓𝐎𝐑 𝐀𝐜𝐭𝐢𝐯𝐞\n\n"
+        f"🛡️ **𝐏𝐫𝐨𝐭𝐞𝐜𝐭𝐢𝐨𝐧:** {'𝐓𝐎𝐑 𝐃𝐢𝐬𝐚𝐛𝐥𝐞𝐝 (𝐑𝐞𝐧𝐝𝐞𝐫)' if IS_RENDER else '𝐓𝐎𝐑 𝐀𝐜𝐭𝐢𝐯𝐞'}\n\n"
         f"👇 **𝐔𝐬𝐞 𝐛𝐮𝐭𝐭𝐨𝐧𝐬 𝐛𝐞𝐥𝐨𝐰:**"
     )
     
@@ -842,7 +971,7 @@ def handle_all_messages(message):
         status_text = (
             "📈 **𝐁𝐨𝐭 𝐒𝐭𝐚𝐭𝐮𝐬**\n\n"
             f"✅ **𝐁𝐨𝐭:** 𝐑𝐮𝐧𝐧𝐢𝐧𝐠\n"
-            f"🔄 **𝐓𝐨𝐫:** 𝐀𝐜𝐭𝐢𝐯𝐞\n"
+            f"🔄 **𝐓𝐨𝐫:** {'𝐃𝐢𝐬𝐚𝐛𝐥𝐞𝐝 (𝐑𝐞𝐧𝐝𝐞𝐫)' if IS_RENDER else '𝐀𝐜𝐭𝐢𝐯𝐞'}\n"
             f"✅ **𝐕𝐞𝐫𝐢𝐟𝐢𝐜𝐚𝐭𝐢𝐨𝐧:** 𝐀𝐜𝐭𝐢𝐯𝐞\n"
             f"👥 **𝐓𝐨𝐭𝐚𝐥 𝐔𝐬𝐞𝐫𝐬:** {stats['total_users']}\n"
             f"📊 **𝐓𝐨𝐭𝐚𝐥 𝐆𝐞𝐧𝐬:** {stats['total_generations']}\n"
@@ -856,7 +985,8 @@ def handle_all_messages(message):
         bot.register_next_step_handler(msg, process_restart)
         
     elif text == BUTTONS['owner'] and is_owner:
-        owner_text = "👑 **𝐎𝐰𝐧𝐞𝐫 𝐏𝐚𝐧𝐞𝐥**\n\n**𝐁𝐨𝐭 𝐢𝐬 𝐫𝐮𝐧𝐧𝐢𝐧𝐠 𝐬𝐦𝐨𝐨𝐭𝐡𝐥𝐲!**\n\n🌐 **𝐃𝐚𝐬𝐡𝐛𝐨𝐚𝐫𝐝:** http://localhost:5000"
+        render_url = os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5000')
+        owner_text = f"👑 **𝐎𝐰𝐧𝐞𝐫 𝐏𝐚𝐧𝐞𝐥**\n\n**𝐁𝐨𝐭 𝐢𝐬 𝐫𝐮𝐧𝐧𝐢𝐧𝐠 𝐬𝐦𝐨𝐨𝐭𝐡𝐥𝐲!**\n\n🌐 **𝐃𝐚𝐬𝐡𝐛𝐨𝐚𝐫𝐝:** {render_url}"
         bot.send_message(chat_id, owner_text, parse_mode='Markdown', reply_markup=create_main_keyboard(is_owner))
     
     elif text == BUTTONS['set_region']:
@@ -988,7 +1118,25 @@ if __name__ == "__main__":
     print("🤖 EXU CODER BOT STARTING...")
     print("🔄 Starting Tor service...")
     
-    if start_tor_service():
+    if IS_RENDER:
+        print("✅ Running on Render - Tor disabled")
+        print("🚀 Bot is live! Press Ctrl+C to stop.")
+        print("✅ Account verification is ACTIVE")
+        render_url = os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5000')
+        print(f"🌐 Web Dashboard: {render_url}")
+        print("📁 Large batches (100+ accounts) will be sent as JSON files")
+        
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        
+        try:
+            bot.infinity_polling(skip_pending=True)
+        except KeyboardInterrupt:
+            print("\n👋 Bot stopped by user")
+        except Exception as e:
+            print(f"❌ Error: {e}")
+    
+    elif start_tor_service():
         print("✅ Tor is running")
         print("🚀 Bot is live! Press Ctrl+C to stop.")
         print("✅ Account verification is ACTIVE")
